@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/rdp.yml << 'ENDOFFILE'
 name: 🚀 ZENOT CLOUD - AUTO DEPLOY RDP
 
 on:
@@ -7,9 +6,7 @@ on:
       server_id:
         description: 'Server ID từ Firebase'
         required: true
-      admin_password:
-        description: 'Admin Password'
-        required: true
+        type: string
 
 jobs:
   deploy:
@@ -22,6 +19,7 @@ jobs:
           Write-Host "╔════════════════════════════════════════════╗" -ForegroundColor Cyan
           Write-Host "║     🚀 ZENOT CLOUD - RDP DEPLOYMENT       ║" -ForegroundColor Cyan
           Write-Host "╚════════════════════════════════════════════╝" -ForegroundColor Cyan
+          Write-Host "🆔 Server ID: ${{ github.event.inputs.server_id }}" -ForegroundColor Yellow
 
       - name: 🔓 Tắt chính sách mật khẩu
         run: |
@@ -30,40 +28,76 @@ jobs:
           (Get-Content "$env:TEMP\secpol.cfg") -replace "PasswordComplexity = 1", "PasswordComplexity = 0" | Set-Content "$env:TEMP\secpol_new.cfg"
           secedit /configure /db c:\windows\security\local.sdb /cfg "$env:TEMP\secpol_new.cfg" /areas SECURITYPOLICY | Out-Null
           Remove-Item "$env:TEMP\secpol*.cfg" -Force -ErrorAction SilentlyContinue
-          Write-Host "✅ Đã tắt" -ForegroundColor Green
+          Write-Host "✅ Đã tắt chính sách" -ForegroundColor Green
+
+      - name: 👤 Tạo mật khẩu Administrator
+        id: create-password
+        run: |
+          Write-Host "🔑 Tạo mật khẩu..." -ForegroundColor Blue
+          
+          # Tạo mật khẩu ngẫu nhiên
+          $randomPart = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 6 | ForEach-Object {[char]$_})
+          $adminPassword = "Admin-$randomPart"
+          
+          Write-Host "✅ Password: $adminPassword" -ForegroundColor Green
+          echo "ADMIN_PASSWORD=$adminPassword" >> $env:GITHUB_ENV
+          echo "admin_password=$adminPassword" >> $env:GITHUB_OUTPUT
 
       - name: 🔐 Cấu hình RDP
         run: |
           Write-Host "🛡️ Cấu hình RDP..." -ForegroundColor Blue
+          
+          # Bật RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          
+          # Firewall
+          netsh advfirewall firewall add rule name="RDP-In" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Out" dir=out action=allow protocol=TCP localport=3389 | Out-Null
+          
+          # Khởi động dịch vụ
           Set-Service TermService -StartupType Automatic
+          Set-Service UmRdpService -StartupType Automatic -ErrorAction SilentlyContinue
           Start-Service TermService
+          Start-Service UmRdpService -ErrorAction SilentlyContinue
+          
           Write-Host "✅ RDP đã kích hoạt" -ForegroundColor Green
 
-      - name: 👤 Tạo Administrator
+      - name: 🔧 Cấu hình tài khoản Administrator
         run: |
-          Write-Host "👤 Tạo Administrator..." -ForegroundColor Blue
-          $pass = ConvertTo-SecureString "${{ github.event.inputs.admin_password }}" -AsPlainText -Force
+          Write-Host "👤 Cấu hình Administrator..." -ForegroundColor Blue
+          
+          $pass = ConvertTo-SecureString $env:ADMIN_PASSWORD -AsPlainText -Force
+          
+          # Kiểm tra và tạo/cập nhật user
           $admin = Get-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue
           
           if ($admin) {
               Set-LocalUser -Name "Administrator" -Password $pass -PasswordNeverExpires $true
               Enable-LocalUser -Name "Administrator"
+              Write-Host "✅ Đã cập nhật Administrator" -ForegroundColor Green
           } else {
-              New-LocalUser -Name "Administrator" -Password $pass -PasswordNeverExpires -AccountNeverExpires | Out-Null
-              Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
+              New-LocalUser -Name "Administrator" -Password $pass -PasswordNeverExpires -AccountNeverExpires -Description "RDP Admin" | Out-Null
+              Write-Host "✅ Đã tạo Administrator" -ForegroundColor Green
           }
           
+          # Thêm vào nhóm
+          Add-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue
-          Write-Host "✅ User: Administrator | Pass: ${{ github.event.inputs.admin_password }}" -ForegroundColor Cyan
+          
+          Write-Host "✅ User: Administrator | Pass: $env:ADMIN_PASSWORD" -ForegroundColor Cyan
 
-      - name: 🧹 Dọn desktop
+      - name: 🧹 Dọn desktop (chỉ giữ Chrome)
         run: |
-          Write-Host "🧹 Dọn desktop..." -ForegroundColor Blue
-          $desktops = @("C:\Users\Administrator\Desktop", "C:\Users\Public\Desktop", "$env:PUBLIC\Desktop")
+          Write-Host "🧹 Dọn dẹp desktop..." -ForegroundColor Blue
+          
+          $desktops = @(
+              "C:\Users\Administrator\Desktop",
+              "C:\Users\Public\Desktop",
+              "$env:PUBLIC\Desktop"
+          )
+          
           foreach($desktop in $desktops) {
               if (Test-Path $desktop) {
                   Get-ChildItem -Path $desktop -File -ErrorAction SilentlyContinue | ForEach-Object {
@@ -73,60 +107,193 @@ jobs:
                   }
               }
           }
-          Write-Host "✅ Đã dọn" -ForegroundColor Green
+          
+          Write-Host "✅ Desktop đã sạch" -ForegroundColor Green
 
-      - name: 📥 Cài Kami Tunnel
+      - name: 📥 Tải Kami Tunnel
         run: |
           Write-Host "📥 Tải Kami Tunnel..." -ForegroundColor Blue
+          
           $url = "https://github.com/kami2k1/tunnel/releases/latest/download/kami-tunnel-windows-amd64.tar.gz"
           $tarFile = "$env:TEMP\kami-tunnel.tar.gz"
-          Invoke-WebRequest -Uri $url -OutFile $tarFile -UseBasicParsing
-          tar -xzf $tarFile -C $env:TEMP
-          Write-Host "✅ Đã tải" -ForegroundColor Green
-
-      - name: 🌐 Khởi động Kami Tunnel
-        run: |
-          Write-Host "🌐 Khởi động tunnel..." -ForegroundColor Blue
-          $kamiExe = "$env:TEMP\kami-tunnel.exe"
           
-          if (Test-Path $kamiExe) {
-              $process = Start-Process -FilePath $kamiExe -ArgumentList "3389" -WindowStyle Hidden -PassThru -RedirectStandardOutput "$env:TEMP\tunnel-output.txt"
-              
-              Write-Host "⏳ Đợi tunnel..." -ForegroundColor Yellow
-              Start-Sleep -Seconds 30
-              
-              $output = Get-Content "$env:TEMP\tunnel-output.txt" -ErrorAction SilentlyContinue
-              $publicURL = if ($output) { $output | Select-String -Pattern "http" | Select-Object -First 1 } else { "Đang lấy..." }
-              
-              Write-Host "✅ Tunnel: $publicURL" -ForegroundColor Cyan
-              echo "PUBLIC_URL=$publicURL" >> $env:GITHUB_ENV
+          # Tải file
+          Invoke-WebRequest -Uri $url -OutFile $tarFile -UseBasicParsing
+          
+          # Giải nén
+          tar -xzf $tarFile -C $env:TEMP
+          
+          # Kiểm tra file
+          if (Test-Path "$env:TEMP\kami-tunnel.exe") {
+              Write-Host "✅ Đã tải Kami Tunnel" -ForegroundColor Green
+          } else {
+              Write-Host "❌ Không tìm thấy kami-tunnel.exe" -ForegroundColor Red
+              exit 1
           }
 
-      - name: 🌍 Lấy IP Public
+      - name: 🌐 Khởi động Kami Tunnel
+        id: start-tunnel
         run: |
-          Write-Host "🌍 Lấy IP..." -ForegroundColor Blue
-          $publicIP = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 5).Trim()
-          echo "PUBLIC_IP=$publicIP" >> $env:GITHUB_ENV
-          Write-Host "✅ IP: $publicIP" -ForegroundColor Green
+          Write-Host "🌐 Khởi động Kami Tunnel..." -ForegroundColor Blue
+          
+          $kamiExe = "$env:TEMP\kami-tunnel.exe"
+          $logFile = "$env:TEMP\kami-output.txt"
+          
+          # Khởi động Kami Tunnel với output redirect
+          $process = Start-Process -FilePath $kamiExe -ArgumentList "3389" -NoNewWindow -PassThru -RedirectStandardOutput $logFile -RedirectStandardError "$env:TEMP\kami-error.txt"
+          
+          Write-Host "⏳ Đợi tunnel khởi động..." -ForegroundColor Yellow
+          Start-Sleep -Seconds 45
+          
+          # Đọc output để lấy IP:PORT
+          $tunnelURL = ""
+          $maxRetries = 20
+          
+          for ($i = 1; $i -le $maxRetries; $i++) {
+              if (Test-Path $logFile) {
+                  $output = Get-Content $logFile -ErrorAction SilentlyContinue
+                  
+                  # Tìm dòng chứa URL hoặc IP:PORT
+                  $urlLine = $output | Select-String -Pattern "http|tcp|:(\d+)" | Select-Object -First 1
+                  
+                  if ($urlLine) {
+                      $tunnelURL = $urlLine.Line.Trim()
+                      
+                      # Parse IP:PORT
+                      if ($tunnelURL -match '(\d+\.\d+\.\d+\.\d+):(\d+)') {
+                          $tunnelIP = $matches[1]
+                          $tunnelPort = $matches[2]
+                          Write-Host "✅ Tunnel IP: $tunnelIP" -ForegroundColor Green
+                          Write-Host "✅ Tunnel Port: $tunnelPort" -ForegroundColor Green
+                          
+                          echo "TUNNEL_IP=$tunnelIP" >> $env:GITHUB_ENV
+                          echo "TUNNEL_PORT=$tunnelPort" >> $env:GITHUB_ENV
+                          echo "TUNNEL_URL=$tunnelIP`:$tunnelPort" >> $env:GITHUB_ENV
+                          
+                          echo "tunnel_ip=$tunnelIP" >> $env:GITHUB_OUTPUT
+                          echo "tunnel_port=$tunnelPort" >> $env:GITHUB_OUTPUT
+                          echo "tunnel_url=$tunnelIP`:$tunnelPort" >> $env:GITHUB_OUTPUT
+                          
+                          break
+                      }
+                      # Nếu là HTTP URL
+                      elseif ($tunnelURL -match 'http://([^:]+):(\d+)') {
+                          $tunnelIP = $matches[1]
+                          $tunnelPort = $matches[2]
+                          Write-Host "✅ Tunnel URL: $tunnelURL" -ForegroundColor Green
+                          
+                          echo "TUNNEL_IP=$tunnelIP" >> $env:GITHUB_ENV
+                          echo "TUNNEL_PORT=$tunnelPort" >> $env:GITHUB_ENV
+                          echo "TUNNEL_URL=$tunnelIP`:$tunnelPort" >> $env:GITHUB_ENV
+                          
+                          echo "tunnel_ip=$tunnelIP" >> $env:GITHUB_OUTPUT
+                          echo "tunnel_port=$tunnelPort" >> $env:GITHUB_OUTPUT
+                          echo "tunnel_url=$tunnelIP`:$tunnelPort" >> $env:GITHUB_OUTPUT
+                          
+                          break
+                      }
+                  }
+              }
+              
+              Write-Host "⏳ Thử lấy URL lần $i/$maxRetries..." -ForegroundColor Yellow
+              Start-Sleep -Seconds 3
+          }
+          
+          # Nếu không lấy được, hiển thị log
+          if (-not $tunnelURL) {
+              Write-Host "⚠️ Không tìm thấy tunnel URL trong log" -ForegroundColor Yellow
+              Write-Host "📋 Log output:" -ForegroundColor Blue
+              if (Test-Path $logFile) {
+                  Get-Content $logFile
+              }
+              Write-Host "📋 Error output:" -ForegroundColor Blue
+              if (Test-Path "$env:TEMP\kami-error.txt") {
+                  Get-Content "$env:TEMP\kami-error.txt"
+              }
+              
+              # Set giá trị mặc định
+              echo "TUNNEL_URL=Đang lấy..." >> $env:GITHUB_ENV
+              echo "tunnel_url=Đang lấy..." >> $env:GITHUB_OUTPUT
+          }
 
-      - name: 📊 Thông tin
+      - name: 🌍 Lấy IP Public (dự phòng)
+        run: |
+          Write-Host "🌍 Lấy IP Public..." -ForegroundColor Blue
+          
+          try {
+              $publicIP = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 5).Trim()
+              echo "PUBLIC_IP=$publicIP" >> $env:GITHUB_ENV
+              Write-Host "✅ IP Public: $publicIP" -ForegroundColor Green
+          } catch {
+              echo "PUBLIC_IP=N/A" >> $env:GITHUB_ENV
+              Write-Host "⚠️ Không lấy được IP Public" -ForegroundColor Yellow
+          }
+
+      - name: 📡 Cập nhật Firebase
+        env:
+          FIREBASE_URL: https://proxy-62231-default-rtdb.asia-southeast1.firebasedatabase.app
+        run: |
+          Write-Host "📡 Cập nhật thông tin lên Firebase..." -ForegroundColor Blue
+          
+          $serverId = "${{ github.event.inputs.server_id }}"
+          $firebaseUrl = "$env:FIREBASE_URL/servers/$serverId.json"
+          
+          # Tạo JSON data
+          $updateData = @{
+              status = "running"
+              publicIP = if ($env:TUNNEL_IP) { $env:TUNNEL_IP } else { $env:PUBLIC_IP }
+              publicURL = if ($env:TUNNEL_URL) { $env:TUNNEL_URL } else { "$($env:PUBLIC_IP):3389" }
+              rdpPort = if ($env:TUNNEL_PORT) { $env:TUNNEL_PORT } else { "3389" }
+              adminPassword = $env:ADMIN_PASSWORD
+              lastUpdate = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+          } | ConvertTo-Json -Compress
+          
+          try {
+              # Update Firebase (không cần auth token cho public database)
+              $response = Invoke-RestMethod -Uri $firebaseUrl -Method PATCH -Body $updateData -ContentType "application/json"
+              Write-Host "✅ Đã cập nhật Firebase" -ForegroundColor Green
+          } catch {
+              Write-Host "⚠️ Lỗi cập nhật Firebase: $($_.Exception.Message)" -ForegroundColor Yellow
+              Write-Host "📋 URL: $firebaseUrl" -ForegroundColor Blue
+              Write-Host "📋 Data: $updateData" -ForegroundColor Blue
+          }
+
+      - name: 📊 Thông tin kết nối
         run: |
           Write-Host ""
           Write-Host "╔════════════════════════════════════════════╗" -ForegroundColor Green
           Write-Host "║          ✅ SERVER SẴN SÀNG!              ║" -ForegroundColor Green
           Write-Host "╠════════════════════════════════════════════╣" -ForegroundColor Green
-          Write-Host "║  🆔 Server: ${{ github.event.inputs.server_id }}" -ForegroundColor White
-          Write-Host "║  🌍 IP: $env:PUBLIC_IP" -ForegroundColor White
-          Write-Host "║  🌐 URL: $env:PUBLIC_URL" -ForegroundColor White
-          Write-Host "║  👤 User: Administrator" -ForegroundColor White
-          Write-Host "║  🔑 Pass: ${{ github.event.inputs.admin_password }}" -ForegroundColor White
-          Write-Host "║  ⏰ Duration: 6 giờ" -ForegroundColor White
+          Write-Host "║  🆔 Server ID: ${{ github.event.inputs.server_id }}" -ForegroundColor White
+          Write-Host "║  🌐 Tunnel URL: $env:TUNNEL_URL" -ForegroundColor White
+          Write-Host "║  🌍 IP Public: $env:PUBLIC_IP" -ForegroundColor White
+          Write-Host "║  ─────────────────────────────────────────  ║" -ForegroundColor DarkGray
+          Write-Host "║  👤 Username: Administrator" -ForegroundColor Cyan
+          Write-Host "║  🔑 Password: $env:ADMIN_PASSWORD" -ForegroundColor Cyan
+          Write-Host "║  🚪 Port: $env:TUNNEL_PORT" -ForegroundColor Cyan
+          Write-Host "║  ─────────────────────────────────────────  ║" -ForegroundColor DarkGray
+          Write-Host "║  ⏰ Thời lượng: 6 giờ" -ForegroundColor Yellow
+          Write-Host "║  🕐 Bắt đầu: $((Get-Date).ToString('HH:mm:ss dd/MM/yyyy'))" -ForegroundColor Yellow
+          Write-Host "║  🕐 Kết thúc: $((Get-Date).AddHours(6).ToString('HH:mm:ss dd/MM/yyyy'))" -ForegroundColor Yellow
+          Write-Host "╠════════════════════════════════════════════╣" -ForegroundColor Green
+          Write-Host "║  📌 CÁCH KẾT NỐI:                          ║" -ForegroundColor Magenta
+          Write-Host "║  1️⃣  Mở Remote Desktop (mstsc)             ║" -ForegroundColor White
+          Write-Host "║  2️⃣  Nhập: $env:TUNNEL_URL                ║" -ForegroundColor White
+          Write-Host "║  3️⃣  User: Administrator                   ║" -ForegroundColor White
+          Write-Host "║  4️⃣  Pass: $env:ADMIN_PASSWORD            ║" -ForegroundColor White
           Write-Host "╚════════════════════════════════════════════╝" -ForegroundColor Green
+          Write-Host ""
 
-      - name: ⏳ Duy trì 6 giờ
+      - name: ⏳ Duy trì server (6 giờ)
         run: |
           $endTime = (Get-Date).AddHours(6)
+          
           Write-Host "🔄 Server đang chạy..." -ForegroundColor Cyan
+          Write-Host "🌐 Kết nối: $env:TUNNEL_URL" -ForegroundColor Yellow
+          Write-Host "⏰ Kết thúc: $($endTime.ToString('HH:mm:ss dd/MM/yyyy'))" -ForegroundColor Yellow
+          Write-Host ""
+          
+          $checkCount = 0
           
           while ((Get-Date) -lt $endTime) {
               $remaining = $endTime - (Get-Date)
@@ -134,26 +301,74 @@ jobs:
               $m = [math]::Floor($remaining.TotalMinutes % 60)
               $s = [math]::Floor($remaining.TotalSeconds % 60)
               
-              Write-Host "`r⏳ Còn: ${h}h ${m}m ${s}s  " -NoNewline -ForegroundColor Green
+              Write-Host "`r⏳ Còn lại: ${h}h ${m}m ${s}s | RDP: " -NoNewline -ForegroundColor Green
               
-              $rdp = Get-Service TermService -ErrorAction SilentlyContinue
-              if ($rdp.Status -ne 'Running') {
-                  Start-Service TermService -ErrorAction SilentlyContinue
+              # Kiểm tra dịch vụ RDP mỗi 60 giây
+              $checkCount++
+              if ($checkCount % 6 -eq 0) {
+                  $rdp = Get-Service TermService -ErrorAction SilentlyContinue
+                  if ($rdp.Status -ne 'Running') {
+                      Write-Host "⚠️  Khởi động lại RDP..." -ForegroundColor Yellow
+                      Start-Service TermService -ErrorAction SilentlyContinue
+                  } else {
+                      Write-Host "OK" -NoNewline -ForegroundColor Green
+                  }
+                  
+                  # Kiểm tra Kami Tunnel
+                  $kamiProcess = Get-Process kami-tunnel -ErrorAction SilentlyContinue
+                  if (-not $kamiProcess) {
+                      Write-Host " | Tunnel: ⚠️  Đã dừng!" -NoNewline -ForegroundColor Red
+                  } else {
+                      Write-Host " | Tunnel: OK" -NoNewline -ForegroundColor Green
+                  }
               }
               
               Start-Sleep -Seconds 10
           }
           
           Write-Host ""
-          Write-Host "⏹️  HẾT GIỜ!" -ForegroundColor Red
+          Write-Host ""
+          Write-Host "⏹️  HẾT THỜI GIAN - SERVER TỰ ĐỘNG ĐÓNG!" -ForegroundColor Red
+
+      - name: 📡 Cập nhật trạng thái hết hạn
+        if: always()
+        env:
+          FIREBASE_URL: https://proxy-62231-default-rtdb.asia-southeast1.firebasedatabase.app
+        run: |
+          Write-Host "📡 Cập nhật trạng thái..." -ForegroundColor Blue
+          
+          $serverId = "${{ github.event.inputs.server_id }}"
+          $firebaseUrl = "$env:FIREBASE_URL/servers/$serverId.json"
+          
+          $updateData = @{
+              status = "expired"
+              lastUpdate = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+          } | ConvertTo-Json -Compress
+          
+          try {
+              Invoke-RestMethod -Uri $firebaseUrl -Method PATCH -Body $updateData -ContentType "application/json" | Out-Null
+              Write-Host "✅ Đã cập nhật trạng thái expired" -ForegroundColor Green
+          } catch {
+              Write-Host "⚠️ Không thể cập nhật: $($_.Exception.Message)" -ForegroundColor Yellow
+          }
 
       - name: 🧹 Dọn dẹp
         if: always()
         run: |
-          Write-Host "🧹 Dọn dẹp..." -ForegroundColor Yellow
+          Write-Host "🧹 Dọn dẹp hệ thống..." -ForegroundColor Yellow
+          
+          # Dừng Kami Tunnel
           Get-Process kami-tunnel -ErrorAction SilentlyContinue | Stop-Process -Force
+          
+          # Tắt RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1 -Force -ErrorAction SilentlyContinue
           Stop-Service TermService -Force -ErrorAction SilentlyContinue
-          Write-Host "✅ Xong!" -ForegroundColor Green
-ENDOFFILE
-echo "✅ File rdp.yml đã tạo"
+          
+          # Xóa firewall rules
+          netsh advfirewall firewall delete rule name="RDP-In" 2>$null | Out-Null
+          netsh advfirewall firewall delete rule name="RDP-Out" 2>$null | Out-Null
+          
+          # Xóa file
+          Remove-Item "$env:TEMP\kami-*" -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "✅ Hoàn tất! Hẹn gặp lại! 👋" -ForegroundColor Green
